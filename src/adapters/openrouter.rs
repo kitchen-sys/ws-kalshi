@@ -42,7 +42,7 @@ impl Brain for OpenRouterClient {
 
         let body = serde_json::json!({
             "model": "anthropic/claude-opus-4-6",
-            "max_tokens": 1000,
+            "max_tokens": 800,
             "temperature": 0.2,
             "messages": [{"role": "user", "content": prompt}]
         });

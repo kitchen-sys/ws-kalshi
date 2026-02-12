@@ -15,19 +15,48 @@ pub async fn run_cycle(
     let resting = exchange.resting_orders().await?;
     for order in &resting {
         exchange.cancel_order(&order.order_id).await?;
-        tracing::info!("Canceled stale order: {}", order.order_id);
+        storage::cancel_trade(&order.order_id)?;
+        tracing::info!("Canceled stale order: {} (ledger marked cancelled)", order.order_id);
     }
 
     // 2. SETTLE — check if previous trade settled, update ledger + stats
     let mut ledger = storage::read_ledger()?;
     if let Some(pending) = ledger.iter().rev().find(|r| r.result == "pending") {
-        let settlements = exchange.settlements(&pending.ticker).await?;
+        let pending_ticker = pending.ticker.clone();
+        let pending_timestamp = pending.timestamp.clone();
+        let settlements = exchange.settlements(&pending_ticker).await?;
         if let Some(s) = settlements.first() {
             storage::settle_last_trade(s)?;
             ledger = storage::read_ledger()?;
             let settled_stats = stats::compute(&ledger);
             storage::write_stats(&settled_stats)?;
-            tracing::info!("Settled: {} | {} {}¢", s.result.to_uppercase(), s.ticker, s.pnl_cents);
+            tracing::info!(
+                "Settled: {} (market_result={}) | {} {}¢",
+                s.result.to_uppercase(), s.market_result, s.ticker, s.pnl_cents
+            );
+        } else {
+            // No settlement found — check if pending entry is stale (>30 min old)
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&pending_timestamp) {
+                let age_min = (chrono::Utc::now() - ts.with_timezone(&chrono::Utc)).num_minutes();
+                if age_min > 30 {
+                    let zombie = Settlement {
+                        ticker: pending_ticker.clone(),
+                        side: Side::Yes,
+                        count: 0,
+                        price_cents: 0,
+                        result: "unknown".into(),
+                        pnl_cents: 0,
+                        settled_time: chrono::Utc::now().to_rfc3339(),
+                        market_result: "unknown".into(),
+                    };
+                    storage::settle_last_trade(&zombie)?;
+                    ledger = storage::read_ledger()?;
+                    tracing::warn!(
+                        "Zombie cleanup: pending entry for {} was {}min old, marked unknown",
+                        pending_ticker, age_min
+                    );
+                }
+            }
         }
     }
 
@@ -93,12 +122,14 @@ pub async fn run_cycle(
     let current_stats = stats::compute(&ledger);
 
     if config.paper_trade {
+        let paper_id = format!("paper-{}", chrono::Utc::now().timestamp_millis());
         tracing::info!(
-            "PAPER: {:?} {}x @ {}¢ | {}",
+            "PAPER: {:?} {}x @ {}¢ | {} ({})",
             side,
             shares,
             price,
-            market.ticker
+            market.ticker,
+            paper_id
         );
         storage::append_ledger(&LedgerRow {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -109,6 +140,7 @@ pub async fn run_cycle(
             result: "pending".into(),
             pnl_cents: 0,
             cumulative_cents: current_stats.total_pnl_cents,
+            order_id: paper_id,
         })?;
     } else {
         let order_result = exchange
@@ -121,7 +153,11 @@ pub async fn run_cycle(
             .await;
 
         match order_result {
-            Ok(order_id) => {
+            Ok(result) => {
+                tracing::info!(
+                    "LIVE: {:?} {}x @ {}¢ | {} (order {} status: {})",
+                    side, shares, price, market.ticker, result.order_id, result.status
+                );
                 if let Err(e) = storage::append_ledger(&LedgerRow {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     ticker: market.ticker.clone(),
@@ -131,19 +167,15 @@ pub async fn run_cycle(
                     result: "pending".into(),
                     pnl_cents: 0,
                     cumulative_cents: current_stats.total_pnl_cents,
+                    order_id: result.order_id.clone(),
                 }) {
                     tracing::error!(
                         "CRITICAL: Order {} placed but ledger write failed: {}",
-                        order_id,
+                        result.order_id,
                         e
                     );
                     return Err(e.into());
                 }
-
-                tracing::info!(
-                    "LIVE: {:?} {}x @ {}¢ | {} (order {})",
-                    side, shares, price, market.ticker, order_id
-                );
             }
             Err(e) => {
                 tracing::error!("Order placement failed: {}", e);

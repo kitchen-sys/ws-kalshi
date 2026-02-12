@@ -19,6 +19,7 @@ pub struct KalshiMarket {
     pub open_time: Option<String>,
     pub close_time: Option<String>,
     pub expiration_time: Option<String>,
+    pub expected_expiration_time: Option<String>,
     pub status: Option<String>,
     pub yes_bid: Option<u32>,
     pub yes_ask: Option<u32>,

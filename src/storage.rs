@@ -45,6 +45,11 @@ fn parse_ledger_content(content: &str) -> Vec<LedgerRow> {
             if cols.len() < 9 {
                 return None;
             }
+            let order_id = if cols.len() >= 10 {
+                cols[9].to_string()
+            } else {
+                String::new()
+            };
             Some(LedgerRow {
                 timestamp: cols[1].to_string(),
                 ticker: cols[2].to_string(),
@@ -54,6 +59,7 @@ fn parse_ledger_content(content: &str) -> Vec<LedgerRow> {
                 result: cols[6].to_string(),
                 pnl_cents: cols[7].parse().ok()?,
                 cumulative_cents: cols[8].parse().ok()?,
+                order_id,
             })
         })
         .collect()
@@ -68,7 +74,7 @@ pub fn append_ledger(row: &LedgerRow) -> anyhow::Result<()> {
     }
 
     let line = format!(
-        "| {} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         row.timestamp,
         row.ticker,
         row.side,
@@ -76,7 +82,8 @@ pub fn append_ledger(row: &LedgerRow) -> anyhow::Result<()> {
         row.price,
         row.result,
         row.pnl_cents,
-        row.cumulative_cents
+        row.cumulative_cents,
+        row.order_id
     );
 
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
@@ -103,8 +110,9 @@ pub fn settle_last_trade(settlement: &Settlement) -> anyhow::Result<()> {
             if cols.len() >= 9 {
                 let prev_cumulative: i64 = cols[8].parse().unwrap_or(0);
                 let new_cumulative = prev_cumulative + settlement.pnl_cents;
+                let order_id = if cols.len() >= 10 { cols[9] } else { "" };
                 *line = format!(
-                    "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                     cols[1],
                     cols[2],
                     cols[3],
@@ -112,7 +120,37 @@ pub fn settle_last_trade(settlement: &Settlement) -> anyhow::Result<()> {
                     cols[5],
                     settlement.result,
                     settlement.pnl_cents,
-                    new_cumulative
+                    new_cumulative,
+                    order_id
+                );
+            }
+            break;
+        }
+    }
+
+    std::fs::write(path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+pub fn cancel_trade(order_id: &str) -> anyhow::Result<()> {
+    let path = "brain/ledger.md";
+    let backup = "brain/ledger.md.bak";
+
+    if std::path::Path::new(path).exists() {
+        std::fs::copy(path, backup)?;
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+    for line in lines.iter_mut().rev() {
+        if line.contains("| pending |") && line.contains(order_id) {
+            let cols: Vec<&str> = line.split('|').map(|s| s.trim()).collect();
+            if cols.len() >= 9 {
+                let oid = if cols.len() >= 10 { cols[9] } else { "" };
+                *line = format!(
+                    "| {} | {} | {} | {} | {} | cancelled | 0 | {} | {} |",
+                    cols[1], cols[2], cols[3], cols[4], cols[5], cols[8], oid
                 );
             }
             break;

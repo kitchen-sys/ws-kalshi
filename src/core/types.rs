@@ -93,6 +93,12 @@ pub struct PriceSnapshot {
 // ── Orders & Positions ──
 
 #[derive(Debug)]
+pub struct OrderResult {
+    pub order_id: String,
+    pub status: String,
+}
+
+#[derive(Debug)]
 pub struct OrderRequest {
     pub ticker: String,
     pub side: Side,
@@ -122,6 +128,7 @@ pub struct Settlement {
     pub result: String,
     pub pnl_cents: i64,
     pub settled_time: String,
+    pub market_result: String,
 }
 
 // ── Stats ──
@@ -162,6 +169,7 @@ pub struct LedgerRow {
     pub result: String,
     pub pnl_cents: i64,
     pub cumulative_cents: i64,
+    pub order_id: String,
 }
 
 // ── Config ──

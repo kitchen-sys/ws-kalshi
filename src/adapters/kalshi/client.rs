@@ -109,8 +109,10 @@ impl Exchange for KalshiClient {
             .markets
             .into_iter()
             .filter_map(|m| {
+                let exp_str = m.expected_expiration_time.as_deref()
+                    .or(m.expiration_time.as_deref())?;
                 let exp =
-                    chrono::DateTime::parse_from_rfc3339(m.expiration_time.as_deref()?)
+                    chrono::DateTime::parse_from_rfc3339(exp_str)
                         .ok()?
                         .with_timezone(&chrono::Utc);
                 let mins = (exp - now).num_seconds() as f64 / 60.0;
@@ -133,7 +135,7 @@ impl Exchange for KalshiClient {
             volume: m.volume.unwrap_or(0),
             volume_24h: m.volume_24h.unwrap_or(0),
             open_interest: m.open_interest.unwrap_or(0),
-            expiration_time: m.expiration_time.unwrap_or_default(),
+            expiration_time: m.expected_expiration_time.or(m.expiration_time).unwrap_or_default(),
             minutes_to_expiry: mins,
         }))
     }
@@ -180,7 +182,7 @@ impl Exchange for KalshiClient {
         self.delete_request(&path).await
     }
 
-    async fn place_order(&self, order: &OrderRequest) -> Result<String> {
+    async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
         let path = "/trade-api/v2/portfolio/orders";
         let side_str = match order.side {
             Side::Yes => "yes",
@@ -197,7 +199,10 @@ impl Exchange for KalshiClient {
         });
 
         let resp: CreateOrderResponse = self.post(path, &body).await?;
-        Ok(resp.order.order_id)
+        Ok(OrderResult {
+            order_id: resp.order.order_id,
+            status: resp.order.status,
+        })
     }
 
     async fn positions(&self) -> Result<Vec<Position>> {
@@ -240,6 +245,7 @@ impl Exchange for KalshiClient {
                     },
                     pnl_cents: pnl,
                     settled_time: s.settled_time.unwrap_or_default(),
+                    market_result: s.market_result,
                 }
             })
             .collect())
