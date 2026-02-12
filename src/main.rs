@@ -7,15 +7,17 @@ mod storage;
 use adapters::binance::BinanceClient;
 use adapters::kalshi::client::KalshiClient;
 use adapters::openrouter::OpenRouterClient;
-use adapters::telegram::TelegramClient;
 use core::types::Config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenv::dotenv().ok();
+    if let Err(e) = dotenv::dotenv() {
+        eprintln!("WARNING: .env load failed: {}", e);
+    }
     tracing_subscriber::fmt::init();
 
     let config = Config::from_env()?;
+    tracing::info!("paper_trade={} confirm_live={}", config.paper_trade, config.confirm_live);
 
     safety::validate_startup(&config)?;
 
@@ -23,8 +25,7 @@ async fn main() -> anyhow::Result<()> {
 
     let exchange = KalshiClient::new(&config)?;
     let brain = OpenRouterClient::new(&config)?;
-    let notifier = TelegramClient::new(&config)?;
     let price_feed = BinanceClient::new(&config)?;
 
-    core::engine::run_cycle(&exchange, &brain, &notifier, &price_feed, &config).await
+    core::engine::run_cycle(&exchange, &brain, &price_feed, &config).await
 }

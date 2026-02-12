@@ -179,8 +179,6 @@ pub struct Config {
     pub openrouter_api_key: String,
     pub kalshi_key_id: String,
     pub kalshi_private_key_pem: String,
-    pub telegram_token: String,
-    pub telegram_chat_id: String,
     pub lockfile_path: String,
 }
 
@@ -208,8 +206,6 @@ impl Config {
             openrouter_api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
             kalshi_key_id: std::env::var("KALSHI_API_KEY_ID").unwrap_or_default(),
             kalshi_private_key_pem: pem,
-            telegram_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
-            telegram_chat_id: std::env::var("TELEGRAM_CHAT_ID").unwrap_or_default(),
             lockfile_path: "/tmp/kalshi-bot.lock".into(),
         })
     }

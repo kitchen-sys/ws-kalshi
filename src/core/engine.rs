@@ -1,7 +1,6 @@
 use crate::core::{indicators, risk, stats, types::*};
 use crate::ports::brain::Brain;
 use crate::ports::exchange::Exchange;
-use crate::ports::notifier::Notifier;
 use crate::ports::price_feed::PriceFeed;
 use crate::storage;
 use anyhow::Result;
@@ -9,7 +8,6 @@ use anyhow::Result;
 pub async fn run_cycle(
     exchange: &dyn Exchange,
     brain: &dyn Brain,
-    notifier: &dyn Notifier,
     price_feed: &dyn PriceFeed,
     config: &Config,
 ) -> Result<()> {
@@ -29,15 +27,7 @@ pub async fn run_cycle(
             ledger = storage::read_ledger()?;
             let settled_stats = stats::compute(&ledger);
             storage::write_stats(&settled_stats)?;
-            notifier
-                .alert(&format!(
-                    "Settled: {} | {} {}¢",
-                    s.result.to_uppercase(),
-                    s.ticker,
-                    s.pnl_cents
-                ))
-                .await
-                .ok();
+            tracing::info!("Settled: {} | {} {}¢", s.result.to_uppercase(), s.ticker, s.pnl_cents);
         }
     }
 
@@ -147,33 +137,16 @@ pub async fn run_cycle(
                         order_id,
                         e
                     );
-                    notifier
-                        .alert(&format!(
-                            "CRITICAL: Order {} placed but ledger write failed: {}. Fix manually!",
-                            order_id, e
-                        ))
-                        .await
-                        .ok();
                     return Err(e.into());
                 }
 
-                notifier
-                    .alert(&format!(
-                        "Trade: {} {}x @ {}¢ | {}",
-                        format!("{:?}", side).to_lowercase(),
-                        shares,
-                        price,
-                        market.ticker
-                    ))
-                    .await
-                    .ok();
+                tracing::info!(
+                    "LIVE: {:?} {}x @ {}¢ | {} (order {})",
+                    side, shares, price, market.ticker, order_id
+                );
             }
             Err(e) => {
                 tracing::error!("Order placement failed: {}", e);
-                notifier
-                    .alert(&format!("Order failed: {}", e))
-                    .await
-                    .ok();
                 return Err(e);
             }
         }
