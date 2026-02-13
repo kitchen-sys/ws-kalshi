@@ -165,6 +165,47 @@ pub fn cancel_trade(order_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn record_early_exit(exit: &crate::core::types::ExitEvent) -> anyhow::Result<()> {
+    let path = "brain/ledger.md";
+    let backup = "brain/ledger.md.bak";
+
+    if std::path::Path::new(path).exists() {
+        std::fs::copy(path, backup)?;
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+    // Find the last pending line for this ticker and update it
+    for line in lines.iter_mut().rev() {
+        if line.contains("| pending |") && line.contains(&exit.ticker) {
+            let cols: Vec<&str> = line.split('|').map(|s| s.trim()).collect();
+            if cols.len() >= 9 {
+                let prev_cumulative: i64 = cols[8].parse().unwrap_or(0);
+                let new_cumulative = prev_cumulative + exit.pnl_cents;
+                let order_id = if cols.len() >= 10 { cols[9] } else { "" };
+                let result_str = format!("exit_{}", exit.reason);
+                *line = format!(
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                    cols[1],
+                    cols[2],
+                    cols[3],
+                    cols[4],
+                    cols[5],
+                    result_str,
+                    exit.pnl_cents,
+                    new_cumulative,
+                    order_id
+                );
+            }
+            break;
+        }
+    }
+
+    std::fs::write(path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
 pub fn write_stats(stats: &Stats) -> anyhow::Result<()> {
     let content = format!(
         "# Stats\n\

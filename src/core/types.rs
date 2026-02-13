@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::fmt;
 
 // ── AI Decision ──
 
@@ -131,6 +132,71 @@ pub struct Settlement {
     pub market_result: String,
 }
 
+// ── WebSocket Events ──
+
+#[derive(Debug, Clone)]
+pub struct OrderbookUpdate {
+    pub ticker: String,
+    pub yes: Vec<(u32, u32)>,
+    pub no: Vec<(u32, u32)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FillEvent {
+    pub order_id: String,
+    pub ticker: String,
+    pub side: Side,
+    pub shares: u32,
+    pub price_cents: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketLifecycleEvent {
+    pub ticker: String,
+    pub status: String,
+    pub result: Option<String>,
+}
+
+// ── Position Management (TP/SL) ──
+
+#[derive(Debug, Clone)]
+pub struct OpenPosition {
+    pub ticker: String,
+    pub side: Side,
+    pub shares: u32,
+    pub entry_price_cents: u32,
+    pub order_id: String,
+    pub entered_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExitReason {
+    TakeProfit,
+    StopLoss,
+    Settlement,
+}
+
+impl fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExitReason::TakeProfit => write!(f, "take_profit"),
+            ExitReason::StopLoss => write!(f, "stop_loss"),
+            ExitReason::Settlement => write!(f, "settlement"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExitEvent {
+    pub ticker: String,
+    pub reason: ExitReason,
+    pub entry_price_cents: u32,
+    pub exit_price_cents: u32,
+    pub shares: u32,
+    pub pnl_cents: i64,
+    pub order_id: String,
+}
+
 // ── Stats ──
 
 #[derive(Debug)]
@@ -187,7 +253,15 @@ pub struct Config {
     pub openrouter_api_key: String,
     pub kalshi_key_id: String,
     pub kalshi_private_key_pem: String,
-    pub lockfile_path: String,
+    // v2: TP/SL
+    pub tp_cents_per_share: u32,
+    pub sl_cents_per_share: u32,
+    // v2: WebSocket URLs
+    pub kalshi_ws_url: String,
+    pub binance_ws_url: String,
+    // v2: Daemon intervals
+    pub entry_cycle_interval_secs: u64,
+    pub position_check_interval_secs: u64,
 }
 
 impl Config {
@@ -214,7 +288,26 @@ impl Config {
             openrouter_api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
             kalshi_key_id: std::env::var("KALSHI_API_KEY_ID").unwrap_or_default(),
             kalshi_private_key_pem: pem,
-            lockfile_path: "/tmp/kalshi-bot.lock".into(),
+            tp_cents_per_share: std::env::var("TP_CENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15),
+            sl_cents_per_share: std::env::var("SL_CENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15),
+            kalshi_ws_url: std::env::var("KALSHI_WS_URL")
+                .unwrap_or_else(|_| "wss://api.elections.kalshi.com/trade-api/ws/v2".into()),
+            binance_ws_url: std::env::var("BINANCE_WS_URL")
+                .unwrap_or_else(|_| "wss://stream.binance.com:9443/ws/btcusdt@kline_1m".into()),
+            entry_cycle_interval_secs: std::env::var("ENTRY_CYCLE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
+            position_check_interval_secs: std::env::var("POSITION_CHECK_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
         })
     }
 }

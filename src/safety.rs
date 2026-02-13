@@ -1,36 +1,6 @@
 use crate::core::types::Config;
 use crate::storage;
-use std::fs;
-use std::io::Write;
-use std::process;
-
-pub struct Lockfile {
-    path: String,
-}
-
-impl Lockfile {
-    pub fn acquire(path: &str) -> anyhow::Result<Self> {
-        if let Ok(contents) = fs::read_to_string(path) {
-            let pid: u32 = contents.trim().parse().unwrap_or(0);
-            if pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                anyhow::bail!("Another instance running (PID {})", pid);
-            }
-            tracing::warn!("Removing stale lockfile (PID {} dead)", pid);
-        }
-
-        let mut f = fs::File::create(path)?;
-        write!(f, "{}", process::id())?;
-        Ok(Self {
-            path: path.to_string(),
-        })
-    }
-}
-
-impl Drop for Lockfile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
+use tokio::sync::watch;
 
 pub fn validate_startup(config: &Config) -> anyhow::Result<()> {
     if config.kalshi_private_key_pem.is_empty() {
@@ -72,4 +42,33 @@ pub fn validate_startup(config: &Config) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Set up a signal handler for graceful shutdown (SIGINT, SIGTERM).
+/// Returns a watch receiver that becomes `true` when shutdown is requested.
+pub fn setup_signal_handler() -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM");
+            tokio::select! {
+                _ = ctrl_c => {
+                    tracing::info!("Received SIGINT — shutting down gracefully");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM — shutting down gracefully");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+            tracing::info!("Received Ctrl+C — shutting down gracefully");
+        }
+        let _ = tx.send(true);
+    });
+    rx
 }

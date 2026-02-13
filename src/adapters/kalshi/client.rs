@@ -205,6 +205,29 @@ impl Exchange for KalshiClient {
         })
     }
 
+    async fn sell_order(&self, order: &OrderRequest) -> Result<OrderResult> {
+        let path = "/trade-api/v2/portfolio/orders";
+        let side_str = match order.side {
+            Side::Yes => "yes",
+            Side::No => "no",
+        };
+        let body = serde_json::json!({
+            "ticker": order.ticker,
+            "action": "sell",
+            "side": side_str,
+            "count": order.shares,
+            "type": "limit",
+            "yes_price": if order.side == Side::Yes { order.price_cents } else { 100 - order.price_cents },
+            "client_order_id": uuid::Uuid::new_v4().to_string(),
+        });
+
+        let resp: CreateOrderResponse = self.post(path, &body).await?;
+        Ok(OrderResult {
+            order_id: resp.order.order_id,
+            status: resp.order.status,
+        })
+    }
+
     async fn positions(&self) -> Result<Vec<Position>> {
         let path = "/trade-api/v2/portfolio/positions";
         let resp: PositionsResponse = self.get(path).await?;

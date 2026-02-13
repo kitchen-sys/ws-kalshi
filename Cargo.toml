@@ -1,6 +1,6 @@
 [package]
 name = "kalshi-bot"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -20,6 +20,9 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+http = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

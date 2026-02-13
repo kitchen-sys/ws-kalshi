@@ -1,3 +1,4 @@
+use crate::core::position_manager::PositionManager;
 use crate::core::{indicators, risk, stats, types::*};
 use crate::ports::brain::Brain;
 use crate::ports::exchange::Exchange;
@@ -5,12 +6,22 @@ use crate::ports::price_feed::PriceFeed;
 use crate::storage;
 use anyhow::Result;
 
-pub async fn run_cycle(
+pub async fn entry_cycle(
     exchange: &dyn Exchange,
     brain: &dyn Brain,
     price_feed: &dyn PriceFeed,
     config: &Config,
+    position_mgr: &PositionManager,
 ) -> Result<()> {
+    // Skip entry if we already hold a position
+    if position_mgr.has_position() {
+        tracing::info!(
+            "Holding position on {} — skipping entry cycle",
+            position_mgr.position().unwrap().ticker
+        );
+        return Ok(());
+    }
+
     // 1. CANCEL stale resting orders from previous cycles
     let resting = exchange.resting_orders().await?;
     for order in &resting {
@@ -184,6 +195,72 @@ pub async fn run_cycle(
     }
 
     // 10. EXIT
+    Ok(())
+}
+
+/// Execute an early exit (TP/SL sell) for the current position.
+pub async fn execute_exit(
+    exchange: &dyn Exchange,
+    position_mgr: &mut PositionManager,
+    reason: ExitReason,
+    config: &Config,
+) -> Result<()> {
+    let exit_event = match position_mgr.build_exit_event(reason.clone()) {
+        Some(e) => e,
+        None => {
+            tracing::warn!("Cannot build exit event — no position or orderbook");
+            return Ok(());
+        }
+    };
+
+    let exit_order = match position_mgr.build_exit_order() {
+        Some(o) => o,
+        None => {
+            tracing::warn!("Cannot build exit order — no position or orderbook");
+            return Ok(());
+        }
+    };
+
+    tracing::info!(
+        "EXIT {}: {:?} {}x | entry={}¢ exit={}¢ pnl={}¢ on {}",
+        reason,
+        exit_order.side,
+        exit_order.shares,
+        exit_event.entry_price_cents,
+        exit_event.exit_price_cents,
+        exit_event.pnl_cents,
+        exit_event.ticker
+    );
+
+    if config.paper_trade {
+        tracing::info!("PAPER EXIT: {} on {}", reason, exit_event.ticker);
+    } else {
+        match exchange.sell_order(&exit_order).await {
+            Ok(result) => {
+                tracing::info!(
+                    "Sell order placed: {} status={}",
+                    result.order_id,
+                    result.status
+                );
+            }
+            Err(e) => {
+                tracing::error!("Sell order failed: {}", e);
+                return Err(e);
+            }
+        }
+    }
+
+    // Record the early exit in ledger
+    if let Err(e) = storage::record_early_exit(&exit_event) {
+        tracing::error!("Failed to record early exit in ledger: {}", e);
+    }
+
+    // Update stats after exit
+    let ledger = storage::read_ledger()?;
+    let updated_stats = stats::compute(&ledger);
+    storage::write_stats(&updated_stats)?;
+
+    position_mgr.clear_position();
     Ok(())
 }
 
