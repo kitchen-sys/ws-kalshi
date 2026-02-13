@@ -1,9 +1,9 @@
 # Stats
-- Total trades: 3
-- Wins: 1 | Losses: 2
-- Win rate: 33.3%
-- Total P&L: -78¢
-- Today P&L: -78¢
-- Streak: -2
-- Max drawdown: 114¢
-- Avg win: 36¢ | Avg loss: -57¢
+- Total trades: 18
+- Wins: 5 | Losses: 13
+- Win rate: 27.8%
+- Total P&L: -246¢
+- Today P&L: -175¢
+- Streak: -7
+- Max drawdown: 326¢
+- Avg win: 79¢ | Avg loss: -49¢
