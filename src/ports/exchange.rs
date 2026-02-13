@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait Exchange: Send + Sync {
-    async fn active_market(&self) -> Result<Option<MarketState>>;
+    async fn active_market(&self, series_ticker: &str) -> Result<Option<MarketState>>;
     async fn orderbook(&self, ticker: &str) -> Result<Orderbook>;
     async fn resting_orders(&self) -> Result<Vec<RestingOrder>>;
     async fn cancel_order(&self, order_id: &str) -> Result<()>;

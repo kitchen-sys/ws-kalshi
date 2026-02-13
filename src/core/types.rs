@@ -222,7 +222,28 @@ pub struct DecisionContext {
     pub last_n_trades: Vec<LedgerRow>,
     pub market: MarketState,
     pub orderbook: Orderbook,
-    pub btc_price: Option<PriceSnapshot>,
+    pub crypto_price: Option<PriceSnapshot>,
+    pub crypto_label: String,
+}
+
+/// Map a Kalshi series ticker to its Binance symbol.
+pub fn series_to_binance_symbol(series: &str) -> &str {
+    match series {
+        "KXBTC15M" => "BTCUSDT",
+        "KXETH15M" => "ETHUSDT",
+        "KXSOL15M" => "SOLUSDT",
+        _ => "BTCUSDT",
+    }
+}
+
+/// Map a Kalshi series ticker to a short asset label.
+pub fn series_to_asset_label(series: &str) -> &str {
+    match series {
+        "KXBTC15M" => "BTC",
+        "KXETH15M" => "ETH",
+        "KXSOL15M" => "SOL",
+        _ => "UNKNOWN",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,7 +269,7 @@ pub struct Config {
     pub min_minutes_to_expiry: f64,
     pub paper_trade: bool,
     pub confirm_live: bool,
-    pub series_ticker: String,
+    pub series_tickers: Vec<String>,
     pub kalshi_base_url: String,
     pub openrouter_api_key: String,
     pub kalshi_key_id: String,
@@ -282,7 +303,13 @@ impl Config {
             confirm_live: std::env::var("CONFIRM_LIVE")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            series_ticker: std::env::var("KALSHI_SERIES_TICKER").unwrap_or_default(),
+            series_tickers: std::env::var("KALSHI_SERIES_TICKERS")
+                .or_else(|_| std::env::var("KALSHI_SERIES_TICKER"))
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             kalshi_base_url: std::env::var("KALSHI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.elections.kalshi.com".into()),
             openrouter_api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
@@ -299,7 +326,7 @@ impl Config {
             kalshi_ws_url: std::env::var("KALSHI_WS_URL")
                 .unwrap_or_else(|_| "wss://api.elections.kalshi.com/trade-api/ws/v2".into()),
             binance_ws_url: std::env::var("BINANCE_WS_URL")
-                .unwrap_or_else(|_| "wss://stream.binance.com:9443/ws/btcusdt@kline_1m".into()),
+                .unwrap_or_else(|_| "wss://stream.binance.us:9443/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m/solusdt@kline_1m".into()),
             entry_cycle_interval_secs: std::env::var("ENTRY_CYCLE_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -3,14 +3,14 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 
 #[derive(Debug, Clone)]
-pub struct BtcPriceUpdate {
+pub struct CryptoPriceUpdate {
+    pub symbol: String,
     pub price: f64,
-    pub timestamp: i64,
 }
 
 pub async fn connect(
     url: &str,
-    tx: mpsc::Sender<BtcPriceUpdate>,
+    tx: mpsc::Sender<CryptoPriceUpdate>,
 ) -> anyhow::Result<()> {
     loop {
         tracing::info!("Binance WS connecting to {}", url);
@@ -50,11 +50,19 @@ pub async fn connect(
     }
 }
 
-fn parse_kline(text: &str) -> Option<BtcPriceUpdate> {
+fn parse_kline(text: &str) -> Option<CryptoPriceUpdate> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
-    let k = v.get("k")?;
+
+    // Combined stream format: {"stream":"btcusdt@kline_1m","data":{...}}
+    // Single stream format: {"e":"kline","k":{...}}
+    let k = if let Some(data) = v.get("data") {
+        data.get("k")?
+    } else {
+        v.get("k")?
+    };
+
     let close_str = k.get("c")?.as_str()?;
     let price = close_str.parse::<f64>().ok()?;
-    let timestamp = k.get("T")?.as_i64()?;
-    Some(BtcPriceUpdate { price, timestamp })
+    let symbol = k.get("s")?.as_str()?.to_string();
+    Some(CryptoPriceUpdate { symbol, price })
 }

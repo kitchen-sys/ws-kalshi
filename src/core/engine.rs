@@ -6,19 +6,21 @@ use crate::ports::price_feed::PriceFeed;
 use crate::storage;
 use anyhow::Result;
 
+/// Run an entry cycle for a specific series (e.g., "KXBTC15M").
+/// Skips if we already hold a position for this series.
 pub async fn entry_cycle(
     exchange: &dyn Exchange,
     brain: &dyn Brain,
     price_feed: &dyn PriceFeed,
     config: &Config,
     position_mgr: &PositionManager,
+    series_ticker: &str,
 ) -> Result<()> {
-    // Skip entry if we already hold a position
-    if position_mgr.has_position() {
-        tracing::info!(
-            "Holding position on {} — skipping entry cycle",
-            position_mgr.position().unwrap().ticker
-        );
+    let asset = series_to_asset_label(series_ticker);
+
+    // Skip entry if we already hold a position for this series
+    if position_mgr.has_position_for_series(series_ticker) {
+        tracing::info!("[{}] Holding position — skipping entry cycle", asset);
         return Ok(());
     }
 
@@ -27,7 +29,7 @@ pub async fn entry_cycle(
     for order in &resting {
         exchange.cancel_order(&order.order_id).await?;
         storage::cancel_trade(&order.order_id)?;
-        tracing::info!("Canceled stale order: {} (ledger marked cancelled)", order.order_id);
+        tracing::info!("[{}] Canceled stale order: {}", asset, order.order_id);
     }
 
     // 2. SETTLE — check if previous trade settled, update ledger + stats
@@ -42,11 +44,10 @@ pub async fn entry_cycle(
             let settled_stats = stats::compute(&ledger);
             storage::write_stats(&settled_stats)?;
             tracing::info!(
-                "Settled: {} (market_result={}) | {} {}¢",
-                s.result.to_uppercase(), s.market_result, s.ticker, s.pnl_cents
+                "[{}] Settled: {} (market_result={}) | {} {}¢",
+                asset, s.result.to_uppercase(), s.market_result, s.ticker, s.pnl_cents
             );
         } else {
-            // No settlement found — check if pending entry is stale (>30 min old)
             if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&pending_timestamp) {
                 let age_min = (chrono::Utc::now() - ts.with_timezone(&chrono::Utc)).num_minutes();
                 if age_min > 30 {
@@ -63,32 +64,32 @@ pub async fn entry_cycle(
                     storage::settle_last_trade(&zombie)?;
                     ledger = storage::read_ledger()?;
                     tracing::warn!(
-                        "Zombie cleanup: pending entry for {} was {}min old, marked unknown",
-                        pending_ticker, age_min
+                        "[{}] Zombie cleanup: pending entry for {} was {}min old",
+                        asset, pending_ticker, age_min
                     );
                 }
             }
         }
     }
 
-    // 3. RISK — deterministic checks in Rust
+    // 3. RISK
     let computed_stats = stats::compute(&ledger);
     let balance = exchange.balance().await?;
 
     if let Some(veto) = risk::check(&computed_stats, balance, config) {
-        tracing::info!("Risk veto: {}", veto);
+        tracing::info!("[{}] Risk veto: {}", asset, veto);
         return Ok(());
     }
 
-    // 4. MARKET — fetch by hardcoded series ticker
-    let market = match exchange.active_market().await? {
+    // 4. MARKET — fetch active market for this series
+    let market = match exchange.active_market(series_ticker).await? {
         Some(m) if m.minutes_to_expiry >= config.min_minutes_to_expiry => m,
         Some(m) => {
-            tracing::info!("Too close to expiry: {:.1}min", m.minutes_to_expiry);
+            tracing::info!("[{}] Too close to expiry: {:.1}min", asset, m.minutes_to_expiry);
             return Ok(());
         }
         None => {
-            tracing::info!("No active market");
+            tracing::info!("[{}] No active market", asset);
             return Ok(());
         }
     };
@@ -96,24 +97,26 @@ pub async fn entry_cycle(
     // 5. ORDERBOOK
     let orderbook = exchange.orderbook(&market.ticker).await?;
 
-    // 5.5. BTC PRICE — external reference (best-effort, non-blocking)
-    let btc_price = fetch_btc_price(price_feed).await;
+    // 5.5. CRYPTO PRICE — fetch for the relevant asset
+    let binance_symbol = series_to_binance_symbol(series_ticker);
+    let crypto_price = fetch_crypto_price(price_feed, binance_symbol).await;
 
-    // 6. BRAIN — one AI call
+    // 6. BRAIN
     let context = DecisionContext {
         prompt_md: storage::read_prompt()?,
         stats: computed_stats,
         last_n_trades: ledger.iter().rev().take(20).cloned().collect(),
         market: market.clone(),
         orderbook,
-        btc_price,
+        crypto_price,
+        crypto_label: format!("{} (Binance {})", asset, binance_symbol),
     };
 
     let decision = brain.decide(&context).await?;
 
     // 7. VALIDATE
     if decision.action == Action::Pass {
-        tracing::info!("PASS: {}", decision.reasoning);
+        tracing::info!("[{}] PASS: {}", asset, decision.reasoning);
         return Ok(());
     }
 
@@ -121,25 +124,21 @@ pub async fn entry_cycle(
     let shares = decision.shares.unwrap_or(1).min(config.max_shares);
     let price = decision.max_price_cents.unwrap_or(50).clamp(1, 99);
 
-    // 8. FINAL POSITION CHECK — only block if position is on THIS market
+    // 8. FINAL POSITION CHECK
     let fresh_positions = exchange.positions().await?;
     if fresh_positions.iter().any(|p| p.ticker == market.ticker) {
-        tracing::warn!("Position on {} — aborting order", market.ticker);
+        tracing::warn!("[{}] Position on {} — aborting order", asset, market.ticker);
         return Ok(());
     }
 
-    // 9. EXECUTE — order FIRST, ledger SECOND
+    // 9. EXECUTE
     let current_stats = stats::compute(&ledger);
 
     if config.paper_trade {
         let paper_id = format!("paper-{}", chrono::Utc::now().timestamp_millis());
         tracing::info!(
-            "PAPER: {:?} {}x @ {}¢ | {} ({})",
-            side,
-            shares,
-            price,
-            market.ticker,
-            paper_id
+            "[{}] PAPER: {:?} {}x @ {}¢ | {} ({})",
+            asset, side, shares, price, market.ticker, paper_id
         );
         storage::append_ledger(&LedgerRow {
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -165,8 +164,8 @@ pub async fn entry_cycle(
         match order_result {
             Ok(result) => {
                 tracing::info!(
-                    "LIVE: {:?} {}x @ {}¢ | {} (order {} status: {})",
-                    side, shares, price, market.ticker, result.order_id, result.status
+                    "[{}] LIVE: {:?} {}x @ {}¢ | {} (order {} status: {})",
+                    asset, side, shares, price, market.ticker, result.order_id, result.status
                 );
                 if let Err(e) = storage::append_ledger(&LedgerRow {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -181,92 +180,79 @@ pub async fn entry_cycle(
                 }) {
                     tracing::error!(
                         "CRITICAL: Order {} placed but ledger write failed: {}",
-                        result.order_id,
-                        e
+                        result.order_id, e
                     );
                     return Err(e.into());
                 }
             }
             Err(e) => {
-                tracing::error!("Order placement failed: {}", e);
+                tracing::error!("[{}] Order placement failed: {}", asset, e);
                 return Err(e);
             }
         }
     }
 
-    // 10. EXIT
     Ok(())
 }
 
-/// Execute an early exit (TP/SL sell) for the current position.
+/// Execute an early exit (TP/SL sell) for a specific position by market ticker.
 pub async fn execute_exit(
     exchange: &dyn Exchange,
     position_mgr: &mut PositionManager,
+    ticker: &str,
     reason: ExitReason,
     config: &Config,
 ) -> Result<()> {
-    let exit_event = match position_mgr.build_exit_event(reason.clone()) {
+    let exit_event = match position_mgr.build_exit_event(ticker, reason.clone()) {
         Some(e) => e,
         None => {
-            tracing::warn!("Cannot build exit event — no position or orderbook");
+            tracing::warn!("Cannot build exit event for {} — no position or orderbook", ticker);
             return Ok(());
         }
     };
 
-    let exit_order = match position_mgr.build_exit_order() {
+    let exit_order = match position_mgr.build_exit_order(ticker) {
         Some(o) => o,
         None => {
-            tracing::warn!("Cannot build exit order — no position or orderbook");
+            tracing::warn!("Cannot build exit order for {} — no position or orderbook", ticker);
             return Ok(());
         }
     };
 
     tracing::info!(
         "EXIT {}: {:?} {}x | entry={}¢ exit={}¢ pnl={}¢ on {}",
-        reason,
-        exit_order.side,
-        exit_order.shares,
-        exit_event.entry_price_cents,
-        exit_event.exit_price_cents,
-        exit_event.pnl_cents,
-        exit_event.ticker
+        reason, exit_order.side, exit_order.shares,
+        exit_event.entry_price_cents, exit_event.exit_price_cents,
+        exit_event.pnl_cents, ticker
     );
 
     if config.paper_trade {
-        tracing::info!("PAPER EXIT: {} on {}", reason, exit_event.ticker);
+        tracing::info!("PAPER EXIT: {} on {}", reason, ticker);
     } else {
         match exchange.sell_order(&exit_order).await {
             Ok(result) => {
-                tracing::info!(
-                    "Sell order placed: {} status={}",
-                    result.order_id,
-                    result.status
-                );
+                tracing::info!("Sell order placed: {} status={}", result.order_id, result.status);
             }
             Err(e) => {
-                tracing::error!("Sell order failed: {}", e);
+                tracing::error!("Sell order failed on {}: {}", ticker, e);
                 return Err(e);
             }
         }
     }
 
-    // Record the early exit in ledger
     if let Err(e) = storage::record_early_exit(&exit_event) {
         tracing::error!("Failed to record early exit in ledger: {}", e);
     }
 
-    // Update stats after exit
     let ledger = storage::read_ledger()?;
     let updated_stats = stats::compute(&ledger);
     storage::write_stats(&updated_stats)?;
 
-    position_mgr.clear_position();
+    position_mgr.clear_position(ticker);
     Ok(())
 }
 
-async fn fetch_btc_price(price_feed: &dyn PriceFeed) -> Option<PriceSnapshot> {
-    let symbol = "BTCUSDT";
-
+async fn fetch_crypto_price(price_feed: &dyn PriceFeed, symbol: &str) -> Option<PriceSnapshot> {
     let (candles_1m, candles_5m, spot) = tokio::join!(
         price_feed.candles(symbol, "1m", 15),
         price_feed.candles(symbol, "5m", 12),
@@ -278,7 +264,7 @@ async fn fetch_btc_price(price_feed: &dyn PriceFeed) -> Option<PriceSnapshot> {
     let spot = spot.ok().flatten()?;
 
     if candles_1m.is_empty() {
-        tracing::warn!("Binance returned empty 1m candles");
+        tracing::warn!("Binance returned empty 1m candles for {}", symbol);
         return None;
     }
 

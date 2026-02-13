@@ -15,7 +15,7 @@ impl BinanceClient {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
                 .build()?,
-            base_url: "https://api.binance.com".into(),
+            base_url: "https://api.binance.us".into(),
         })
     }
 }

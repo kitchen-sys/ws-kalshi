@@ -20,16 +20,17 @@ impl OpenRouterClient {
 #[async_trait]
 impl Brain for OpenRouterClient {
     async fn decide(&self, ctx: &DecisionContext) -> Result<TradeDecision> {
-        let btc_section = match &ctx.btc_price {
+        let price_section = match &ctx.crypto_price {
             Some(snap) => format!(
-                "\n\n---\n## BTC PRICE (Binance BTCUSDT)\n{}",
-                format_btc_price(snap)
+                "\n\n---\n## {} PRICE\n{}",
+                ctx.crypto_label,
+                format_crypto_price(snap)
             ),
-            None => "\n\n---\n## BTC PRICE\nUnavailable this cycle.".into(),
+            None => format!("\n\n---\n## {} PRICE\nUnavailable this cycle.", ctx.crypto_label),
         };
 
         let prompt = format!(
-            "{prompt}\n\n---\n## STATS\n{stats}\n\n---\n## LAST {n} TRADES\n{ledger}\n\n---\n## MARKET\n{market}\n\n---\n## ORDERBOOK\nYes bids: {yes_ob}\nNo bids: {no_ob}{btc}",
+            "{prompt}\n\n---\n## STATS\n{stats}\n\n---\n## LAST {n} TRADES\n{ledger}\n\n---\n## MARKET\n{market}\n\n---\n## ORDERBOOK\nYes bids: {yes_ob}\nNo bids: {no_ob}{price}",
             prompt = ctx.prompt_md,
             stats = format_stats(&ctx.stats),
             n = ctx.last_n_trades.len(),
@@ -37,7 +38,7 @@ impl Brain for OpenRouterClient {
             market = format_market(&ctx.market),
             yes_ob = format_ob_side(&ctx.orderbook.yes),
             no_ob = format_ob_side(&ctx.orderbook.no),
-            btc = btc_section,
+            price = price_section,
         );
 
         let body = serde_json::json!({
@@ -112,7 +113,7 @@ fn format_ob_side(levels: &[(u32, u32)]) -> String {
         .join(", ")
 }
 
-fn format_btc_price(snap: &PriceSnapshot) -> String {
+fn format_crypto_price(snap: &PriceSnapshot) -> String {
     let ind = &snap.indicators;
     let momentum_str = match ind.momentum {
         MomentumDirection::Up => "UP",

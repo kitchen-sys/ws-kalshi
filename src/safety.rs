@@ -10,8 +10,8 @@ pub fn validate_startup(config: &Config) -> anyhow::Result<()> {
         anyhow::bail!("PEM file doesn't look like a private key");
     }
 
-    if config.series_ticker.is_empty() {
-        anyhow::bail!("KALSHI_SERIES_TICKER not set — run discovery first");
+    if config.series_tickers.is_empty() {
+        anyhow::bail!("KALSHI_SERIES_TICKERS not set — run discovery first");
     }
 
     if config.openrouter_api_key.is_empty() {

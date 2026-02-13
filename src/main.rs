@@ -12,6 +12,7 @@ use adapters::openrouter::OpenRouterClient;
 use core::engine;
 use core::position_manager::PositionManager;
 use core::types::Config;
+use std::collections::{HashMap, HashSet};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,9 +23,10 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env()?;
     tracing::info!(
-        "kalshi-bot v2 daemon | paper_trade={} confirm_live={} tp={}¢ sl={}¢",
+        "kalshi-bot v2 daemon | paper_trade={} confirm_live={} tp={}¢ sl={}¢ assets={:?}",
         config.paper_trade, config.confirm_live,
-        config.tp_cents_per_share, config.sl_cents_per_share
+        config.tp_cents_per_share, config.sl_cents_per_share,
+        config.series_tickers
     );
 
     safety::validate_startup(&config)?;
@@ -44,8 +46,8 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let kalshi_ws_sender = kalshi_ws::connect(&config.kalshi_ws_url, &kalshi_auth, kalshi_tx).await?;
 
-    // Binance WebSocket
-    let (binance_tx, mut binance_rx) = tokio::sync::mpsc::channel::<binance_ws::BtcPriceUpdate>(256);
+    // Binance WebSocket — combined stream for all assets
+    let (binance_tx, mut binance_rx) = tokio::sync::mpsc::channel::<binance_ws::CryptoPriceUpdate>(256);
     let binance_ws_url = config.binance_ws_url.clone();
     tokio::spawn(async move {
         if let Err(e) = binance_ws::connect(&binance_ws_url, binance_tx).await {
@@ -61,28 +63,31 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(config.position_check_interval_secs),
     );
 
-    // Track latest BTC price
-    let mut latest_btc_price: Option<f64> = None;
-    // Track current subscribed ticker for WS
-    let mut subscribed_ticker: Option<String> = None;
+    // Track latest prices per Binance symbol (e.g., "BTCUSDT" → 66322.01)
+    let mut latest_prices: HashMap<String, f64> = HashMap::new();
+    // Track subscribed market tickers for WS
+    let mut subscribed_tickers: HashSet<String> = HashSet::new();
 
-    // Run the first entry cycle immediately
-    tracing::info!("Running initial entry cycle");
-    if let Err(e) = engine::entry_cycle(&exchange, &brain, &price_feed, &config, &position_mgr).await {
-        tracing::error!("Initial entry cycle error: {}", e);
+    // Run initial entry cycles for all series
+    tracing::info!("Running initial entry cycles for {} assets", config.series_tickers.len());
+    for series in &config.series_tickers {
+        if let Err(e) = engine::entry_cycle(
+            &exchange, &brain, &price_feed, &config, &position_mgr, series
+        ).await {
+            tracing::error!("[{}] Initial entry cycle error: {}", series, e);
+        }
     }
 
     tracing::info!("Entering event loop");
     loop {
-        // If position_mgr got a position from entry_cycle, subscribe to its ticker
-        if let Some(pos) = position_mgr.position() {
-            if subscribed_ticker.as_deref() != Some(&pos.ticker) {
-                let ticker = pos.ticker.clone();
+        // Subscribe to orderbook/fill/lifecycle for any new position tickers
+        for ticker in position_mgr.position_tickers() {
+            if !subscribed_tickers.contains(&ticker) {
                 kalshi_ws_sender.subscribe(
                     vec!["orderbook_delta".into(), "fill".into(), "market_lifecycle_v2".into()],
                     &ticker,
                 ).await;
-                subscribed_ticker = Some(ticker);
+                subscribed_tickers.insert(ticker);
             }
         }
 
@@ -102,16 +107,16 @@ async fn main() -> anyhow::Result<()> {
                             fill.side, fill.shares, fill.price_cents,
                             fill.ticker, fill.order_id
                         );
+                        let ticker = fill.ticker.clone();
                         position_mgr.on_fill(&fill);
 
-                        // Subscribe to orderbook for the filled ticker if needed
-                        if subscribed_ticker.as_deref() != Some(&fill.ticker) {
-                            let ticker = fill.ticker.clone();
+                        // Subscribe to orderbook for the filled ticker
+                        if !subscribed_tickers.contains(&ticker) {
                             kalshi_ws_sender.subscribe(
                                 vec!["orderbook_delta".into(), "market_lifecycle_v2".into()],
                                 &ticker,
                             ).await;
-                            subscribed_ticker = Some(ticker);
+                            subscribed_tickers.insert(ticker);
                         }
                     }
                     KalshiWsEvent::MarketLifecycle(lifecycle) => {
@@ -119,30 +124,23 @@ async fn main() -> anyhow::Result<()> {
                             "Market lifecycle: {} status={} result={:?}",
                             lifecycle.ticker, lifecycle.status, lifecycle.result
                         );
-                        // If market settled while we hold a position, clear it
                         if lifecycle.status == "settled" || lifecycle.status == "finalized" {
-                            if position_mgr.has_position() {
-                                if let Some(pos) = position_mgr.position() {
-                                    if pos.ticker == lifecycle.ticker {
-                                        tracing::info!("Market settled — clearing position");
-                                        position_mgr.clear_position();
-                                        // Unsubscribe
-                                        if let Some(ref ticker) = subscribed_ticker {
-                                            kalshi_ws_sender.unsubscribe(
-                                                vec!["orderbook_delta".into(), "fill".into(), "market_lifecycle_v2".into()],
-                                                ticker,
-                                            ).await;
-                                        }
-                                        subscribed_ticker = None;
-                                    }
-                                }
+                            if position_mgr.position_for_ticker(&lifecycle.ticker).is_some() {
+                                tracing::info!("Market settled — clearing position on {}", lifecycle.ticker);
+                                position_mgr.clear_position(&lifecycle.ticker);
+                                // Unsubscribe
+                                kalshi_ws_sender.unsubscribe(
+                                    vec!["orderbook_delta".into(), "fill".into(), "market_lifecycle_v2".into()],
+                                    &lifecycle.ticker,
+                                ).await;
+                                subscribed_tickers.remove(&lifecycle.ticker);
                             }
                         }
                     }
                     KalshiWsEvent::Disconnected => {
                         tracing::warn!("Kalshi WS disconnected — will auto-reconnect");
-                        // Re-subscribe after reconnect
-                        if let Some(ref ticker) = subscribed_ticker {
+                        // Re-subscribe all active tickers after reconnect
+                        for ticker in &subscribed_tickers {
                             kalshi_ws_sender.subscribe(
                                 vec!["orderbook_delta".into(), "fill".into(), "market_lifecycle_v2".into()],
                                 ticker,
@@ -153,39 +151,54 @@ async fn main() -> anyhow::Result<()> {
             }
 
             Some(update) = binance_rx.recv() => {
-                latest_btc_price = Some(update.price);
-                tracing::debug!("BTC price: ${:.2}", update.price);
+                tracing::debug!("{} price: ${:.2}", update.symbol, update.price);
+                latest_prices.insert(update.symbol, update.price);
             }
 
             _ = entry_timer.tick() => {
-                tracing::info!("Entry cycle tick (btc=${:.2})", latest_btc_price.unwrap_or(0.0));
-                if let Err(e) = engine::entry_cycle(
-                    &exchange, &brain, &price_feed, &config, &position_mgr
-                ).await {
-                    tracing::error!("Entry cycle error: {}", e);
+                let price_summary: Vec<String> = latest_prices.iter()
+                    .map(|(s, p)| format!("{}=${:.2}", s, p))
+                    .collect();
+                tracing::info!(
+                    "Entry cycle tick | {} positions | prices: {}",
+                    position_mgr.position_count(),
+                    if price_summary.is_empty() { "none".into() } else { price_summary.join(", ") }
+                );
+
+                // Run entry cycle for each series that doesn't have a position
+                for series in &config.series_tickers {
+                    if let Err(e) = engine::entry_cycle(
+                        &exchange, &brain, &price_feed, &config, &position_mgr, series
+                    ).await {
+                        tracing::error!("[{}] Entry cycle error: {}", series, e);
+                    }
                 }
             }
 
             _ = position_timer.tick() => {
-                if position_mgr.has_position() {
-                    if let Some(pnl) = position_mgr.unrealized_pnl_per_share() {
-                        tracing::debug!("Position check: unrealized P&L = {}¢/share", pnl);
+                if position_mgr.position_count() > 0 {
+                    // Log unrealized P&L for all positions
+                    for ticker in position_mgr.position_tickers() {
+                        if let Some(pnl) = position_mgr.unrealized_pnl_per_share(&ticker) {
+                            tracing::debug!("Position {}: unrealized P&L = {}¢/share", ticker, pnl);
+                        }
                     }
-                    if let Some(reason) = position_mgr.check_exit() {
-                        tracing::info!("Exit signal: {:?}", reason);
+
+                    // Check all positions for TP/SL exits
+                    let exits = position_mgr.check_exits();
+                    for (ticker, reason) in exits {
+                        tracing::info!("Exit signal: {:?} on {}", reason, ticker);
                         if let Err(e) = engine::execute_exit(
-                            &exchange, &mut position_mgr, reason, &config
+                            &exchange, &mut position_mgr, &ticker, reason, &config
                         ).await {
-                            tracing::error!("Exit execution error: {}", e);
+                            tracing::error!("Exit execution error on {}: {}", ticker, e);
                         }
-                        // Unsubscribe from old ticker
-                        if let Some(ref ticker) = subscribed_ticker {
-                            kalshi_ws_sender.unsubscribe(
-                                vec!["orderbook_delta".into(), "fill".into(), "market_lifecycle_v2".into()],
-                                ticker,
-                            ).await;
-                        }
-                        subscribed_ticker = None;
+                        // Unsubscribe from exited ticker
+                        kalshi_ws_sender.unsubscribe(
+                            vec!["orderbook_delta".into(), "fill".into(), "market_lifecycle_v2".into()],
+                            &ticker,
+                        ).await;
+                        subscribed_tickers.remove(&ticker);
                     }
                 }
             }
