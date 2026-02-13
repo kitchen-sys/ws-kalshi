@@ -29,8 +29,13 @@ impl Brain for OpenRouterClient {
             None => format!("\n\n---\n## {} PRICE\nUnavailable this cycle.", ctx.crypto_label),
         };
 
+        let signal_section = match &ctx.signal_summary {
+            Some(summary) => format!("\n\n---\n## SIGNAL SUMMARY\n{}", format_signal_summary(summary)),
+            None => "\n\n---\n## SIGNAL SUMMARY\nUnavailable this cycle.".to_string(),
+        };
+
         let prompt = format!(
-            "{prompt}\n\n---\n## STATS\n{stats}\n\n---\n## LAST {n} TRADES\n{ledger}\n\n---\n## MARKET\n{market}\n\n---\n## ORDERBOOK\nYes bids: {yes_ob}\nNo bids: {no_ob}{price}",
+            "{prompt}\n\n---\n## STATS\n{stats}\n\n---\n## LAST {n} TRADES\n{ledger}\n\n---\n## MARKET\n{market}\n\n---\n## ORDERBOOK\nYes bids: {yes_ob}\nNo bids: {no_ob}{price}{signal}",
             prompt = ctx.prompt_md,
             stats = format_stats(&ctx.stats),
             n = ctx.last_n_trades.len(),
@@ -39,6 +44,7 @@ impl Brain for OpenRouterClient {
             yes_ob = format_ob_side(&ctx.orderbook.yes),
             no_ob = format_ob_side(&ctx.orderbook.no),
             price = price_section,
+            signal = signal_section,
         );
 
         let body = serde_json::json!({
@@ -122,15 +128,20 @@ fn format_crypto_price(snap: &PriceSnapshot) -> String {
     };
 
     let mut s = format!(
-        "Spot: ${:.2} | 15m change: {:+.3}% | 1h change: {:+.3}% | Momentum: {}\n\
-         SMA(15x1m): ${:.2} | Price vs SMA: {} | 1m volatility: {:.4}%",
+        "Spot: ${:.2} | 5m change: {:+.3}% | 15m change: {:+.3}% | 1h change: {:+.3}% | Momentum: {}\n\
+         SMA(15x1m): ${:.2} | Price vs SMA: {} | 1m volatility: {:.4}%\n\
+         RSI(9): {:.1} | EMA(9): ${:.2} | Price vs EMA: {}",
         ind.spot_price,
+        ind.pct_change_5m,
         ind.pct_change_15m,
         ind.pct_change_1h,
         momentum_str,
         ind.sma_15m,
         ind.price_vs_sma,
         ind.volatility_1m,
+        ind.rsi_9,
+        ind.ema_9,
+        ind.price_vs_ema,
     );
 
     if !ind.last_3_candles.is_empty() {
@@ -149,6 +160,34 @@ fn format_crypto_price(snap: &PriceSnapshot) -> String {
     }
 
     s
+}
+
+fn format_signal_summary(summary: &SignalSummary) -> String {
+    let side_str = match &summary.recommended_side {
+        Some(Side::Yes) => "YES",
+        Some(Side::No) => "NO",
+        None => "NONE (no edge)",
+    };
+
+    format!(
+        "Trend alignment: {}\n\
+         RSI(9) signal: {}\n\
+         Orderbook imbalance: {:.2} (>1 = bid-heavy, <1 = ask-heavy)\n\
+         Estimated probability YES: {:.0}%\n\
+         Recommended side: {}\n\
+         Estimated edge: {:.1} points\n\
+         Kelly-optimal shares: {}\n\
+         ---\n\
+         {}",
+        summary.trend,
+        summary.rsi_signal,
+        summary.orderbook_imbalance,
+        summary.estimated_probability,
+        side_str,
+        summary.estimated_edge,
+        summary.kelly_shares,
+        summary.narrative,
+    )
 }
 
 fn parse_decision(raw: &str) -> Result<TradeDecision> {
@@ -170,6 +209,8 @@ fn parse_decision(raw: &str) -> Result<TradeDecision> {
             shares: None,
             max_price_cents: None,
             reasoning: "Failed to parse AI response".into(),
+            estimated_probability: None,
+            estimated_edge: None,
         });
     };
 

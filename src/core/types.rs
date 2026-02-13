@@ -1,6 +1,39 @@
 use serde::Deserialize;
 use std::fmt;
 
+// ── Signal Analysis ──
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrendAlignment {
+    AllUp,
+    AllDown,
+    Mixed,
+    AllFlat,
+}
+
+impl fmt::Display for TrendAlignment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrendAlignment::AllUp => write!(f, "ALL_UP"),
+            TrendAlignment::AllDown => write!(f, "ALL_DOWN"),
+            TrendAlignment::Mixed => write!(f, "MIXED"),
+            TrendAlignment::AllFlat => write!(f, "ALL_FLAT"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalSummary {
+    pub trend: TrendAlignment,
+    pub rsi_signal: String,
+    pub orderbook_imbalance: f64,
+    pub recommended_side: Option<Side>,
+    pub estimated_edge: f64,
+    pub kelly_shares: u32,
+    pub estimated_probability: f64,
+    pub narrative: String,
+}
+
 // ── AI Decision ──
 
 #[derive(Debug, Deserialize)]
@@ -10,6 +43,10 @@ pub struct TradeDecision {
     pub shares: Option<u32>,
     pub max_price_cents: Option<u32>,
     pub reasoning: String,
+    #[serde(default)]
+    pub estimated_probability: Option<f64>,
+    #[serde(default)]
+    pub estimated_edge: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -76,11 +113,15 @@ pub struct PriceIndicators {
     pub spot_price: f64,
     pub pct_change_15m: f64,
     pub pct_change_1h: f64,
+    pub pct_change_5m: f64,
     pub momentum: MomentumDirection,
     pub sma_15m: f64,
     pub price_vs_sma: String,
     pub volatility_1m: f64,
     pub last_3_candles: Vec<Candle>,
+    pub rsi_9: f64,
+    pub ema_9: f64,
+    pub price_vs_ema: String,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +265,7 @@ pub struct DecisionContext {
     pub orderbook: Orderbook,
     pub crypto_price: Option<PriceSnapshot>,
     pub crypto_label: String,
+    pub signal_summary: Option<SignalSummary>,
 }
 
 /// Map a Kalshi series ticker to its Binance symbol.

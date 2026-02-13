@@ -101,6 +101,22 @@ pub async fn entry_cycle(
     let binance_symbol = series_to_binance_symbol(series_ticker);
     let crypto_price = fetch_crypto_price(price_feed, binance_symbol).await;
 
+    // 5.6. SIGNAL SUMMARY — compute from indicators + orderbook + market
+    let signal_summary = crypto_price.as_ref().map(|snap| {
+        indicators::compute_signal_summary(&snap.indicators, &orderbook, &market)
+    });
+
+    // 5.7. PRE-FILTER — skip LLM call if no signal (saves ~$0.05/cycle)
+    if let Some(ref summary) = signal_summary {
+        if summary.recommended_side.is_none() && summary.estimated_edge < 5.0 {
+            tracing::info!(
+                "[{}] Pre-filter: no signal (edge={:.1}pt) — skipping LLM call",
+                asset, summary.estimated_edge
+            );
+            return Ok(());
+        }
+    }
+
     // 6. BRAIN
     let context = DecisionContext {
         prompt_md: storage::read_prompt()?,
@@ -110,6 +126,7 @@ pub async fn entry_cycle(
         orderbook,
         crypto_price,
         crypto_label: format!("{} (Binance {})", asset, binance_symbol),
+        signal_summary: signal_summary.clone(),
     };
 
     let decision = brain.decide(&context).await?;
@@ -121,8 +138,40 @@ pub async fn entry_cycle(
     }
 
     let side = decision.side.unwrap_or(Side::Yes);
-    let shares = decision.shares.unwrap_or(1).min(config.max_shares);
     let price = decision.max_price_cents.unwrap_or(50).clamp(1, 99);
+
+    // 7.5. EDGE VALIDATION GATE — block insufficient edge
+    let current_streak = stats::compute(&ledger).current_streak;
+    if let Some(veto) = risk::validate_edge(
+        decision.estimated_probability,
+        decision.estimated_edge,
+        price,
+        current_streak,
+    ) {
+        tracing::info!("[{}] Edge gate veto: {}", asset, veto);
+        return Ok(());
+    }
+
+    // 7.6. KELLY CAP — clamp LLM's shares to Kelly-optimal
+    let proposed_shares = decision.shares.unwrap_or(1);
+    let kelly_cap = if let Some(ref summary) = signal_summary {
+        if summary.kelly_shares > 0 {
+            summary.kelly_shares
+        } else {
+            // Compute from LLM's probability if signal summary had no recommendation
+            let win_prob = decision.estimated_probability.unwrap_or(50.0) / 100.0;
+            risk::kelly_shares(win_prob, price, config.max_shares)
+        }
+    } else {
+        let win_prob = decision.estimated_probability.unwrap_or(50.0) / 100.0;
+        risk::kelly_shares(win_prob, price, config.max_shares)
+    };
+    let shares = proposed_shares.min(kelly_cap.max(1)).min(config.max_shares);
+
+    tracing::info!(
+        "[{}] Sizing: LLM proposed {} shares, Kelly cap {}, final {}",
+        asset, proposed_shares, kelly_cap, shares
+    );
 
     // 8. FINAL POSITION CHECK
     let fresh_positions = exchange.positions().await?;
